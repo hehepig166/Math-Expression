@@ -1,0 +1,294 @@
+====================================================================2021-10-8
+
+
+====================================================================2021-10-7
+凌晨找到bug: 202110072220 中 simplify_LevelingOperators() 里
+    本应是 "if (this->Op=='+' || this->Op=='*')" 但写成 != 了
+
+ExprAST {
+    virtual int simplify_TransformNegatives();  // 在此节点代表的子树内把负号改为正号
+    virtual int simplify_LevelingOperators();   // 在此节点代表的子树内在把把存在结合性的可合并节点合并(减短深度) (如 "(+,1,(+,2,3)) -> (+,1,2,3)")
+    virtual int simplify_SimplifyingRationalExpressions;    // 在此节点代表的子树内，合并除法使得除法节点不为 除/乘节点 的儿子
+}
+
+AST.h, AST.cpp 分离出来了
+生成测试:
+g++ -Wall ./common/BigInteger.cpp ./common/RationalNumber.cpp ./common/Lexer.cpp ./common/AST.cpp ./common/Parser.cpp ./tmp_Parser.cpp
+
+
+测化简
+    "a/b*c/d/e"
+    "(1/2)/(3/4)"
+    "1/2/3/4"
+    "1+(2+(3+(4-5+6)))"
+    "1+(2-(3+4-(6-7)))"
+    "2+(6-5^2+(30-3.5))-(1+2-(3+4))"
+    "1-2.5+4-3^(5-7.5+4)-0"
+    "1-2-3+4+5-6"
+    "(1+2)/((3+4)/(5+6))"
+    "(a+b)/((c+d)/(e/f))"
+
+出现问题：为啥 static const 全局 INT_1 在一开始的时候会是 0，导致程序开头会输出一个 err(0/0)
+
+====================================================================2021-10-6
+BigInteger {
+    void append_string(string &) const;
+    string to_string() const;
+}
+
+RationalNumber {
+    void aappend_string(string &) const;
+    string to_string() const;
+}
+
+ExprAST {
+    virtual void aappend_string(string &Str);    // 将该节点代表的表达式以字符串方式附加到Str后面
+    virtual string to_string();  // 返回该节点代表的表达式字符串
+}
+
+====================================================================2021-10-5
+计划：将 Parser 单独分出来一个文件， AST 作为一组类放到一个文件里
+
+====================================================================2021-10-4
+用 unique_ptr 以避免繁琐且易出错的内存申请转移释放过程
+
+identifier 中暂不支持函数
+
+OpID 规则，初步定为：
+  可信值为正数，负数为异常值
+  1~127 留作 ASCII 字符一一对应，
+  其它的 int 用于其它多字符操作符，如 ">=" ":=" 等。
+
+class ExprAST; (virtual)
+class NumberExprAST, VariableExprAST, OpExprAST : ExprAST;
+Parser {
+    init(const string &);
+
+    unique_ptr<ExprAST> ParseNumberExpr();
+    unique_ptr<ExprAST> ParseParenExpr();
+    unique_ptr<ExprAST> ParseIdentifierExpr();
+    unique_ptr<ExprAST> ParsePrimary();
+
+    unique_ptr<ExprAST> ParseExpression();
+    unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec, unique_ptr<ExprAST> LHS);
+}
+
+Parser 测试
+g++ -Wall ./common/BigInteger.cpp ./common/RationalNumber.cpp ./common/Lexer.cpp ./common/Parser.cpp tmp_Parser.cpp
+    "(1.5*2^(7-5))/(0.5-8/4^2)"
+    "(1+2^(5.6-3*2/10*6-3))"
+    "1+(.5^(10-(0.4*5^2+6))+6.2-2.4/2 )"
+    ".4+2*0.25/3 ^2*9+ 0.7-.1"
+
+
+RationalNumber {
+
+    修复bug: 在 vectorDivide 中最后加了个判断 QR.size() 以避免非法引用内存
+
+    while (Q.size() && Q.back()==0)
+		Q.pop_back();
+	while (R.size() && R.back()==0)
+		R.pop_back();
+
+    改善: 除法加了除以一的特判
+    
+}
+
+====================================================================2021-10-3
+初步测试完成词法分析
+
+Lexer {
+    
+    enumToken {
+
+    }
+
+    void init(const string &Str);
+    
+    int gettok();
+    int curtok();
+
+    const RationalNumber& getNumber();
+    const string& getIdentifier();
+    const int getOp();
+} 
+
+测试词法分析
+g++ -Wall ./common/BigInteger.cpp ./common/RationalNumber.cpp ./common/Lexer.cpp tmp_Lexer.cpp
+
+测试有理数类
+g++ -Wall ./common/BigInteger.cpp  ./common/RationalNumber.cpp tmp_RationalNumber.cpp                      
+
+
+实数化简参考 http://www.math.wpi.edu/IQP/BVCalcHist/calc5.html#_Toc407004392
+
+化简步骤:
+    1. Transforming Negatives
+        把减号改为可交换的加号（负号同理）。
+        a-b     ->  a + (-1 * b)
+
+    2. Leveling Operators
+        把可合并的加/乘法合并到一个节点上（一个节点可以有多个儿子）。
+
+    3. Simplifying Rational Expressions
+        使得除法节点不为任意一个乘/除节点的儿子。
+        有三种Case
+            /(/(a,b), c)    ->      /(a, *(b,c))
+            /(a, /(b,c))    ->      /(*(a,c), b)
+            *(a, /(b,c))    ->      /(*(a,b), c)
+
+    4. Collecting Like Terms
+
+    5. Folding Constantes
+        若某个节点下全是可计算数，那么这个节点为根的子树就可以计算成为一个节点。
+        但并不是所有情况都适合提前计算，例如 10^1000，就不应该提前计算（算出的数太大了，反而移动起来很麻烦）。
+        所以只对最终答案位数小于 100 的节点化简。
+        0^(!0)  ->  0
+        (!0)^0  ->  1
+        1*~     ->  ~
+        ~*1
+        0*~     ->  0
+        ~*0
+        ~/1     ->  ~
+    
+    6. Canonical Order
+        比较运算。
+        定义一个比较函数，对每个结点的儿子排序即可。
+    
+    7. Full Simplification
+        对一个节点多次化简直至该节点不再改变。
+
+
+====================================================================2021-9-30
+BigInteger 构造函数将 int 改成了 long long
+
+RationalNumber {
+    取模 (%) (只有都是整数时才进行运算)
+    比较 (== != < > <= >=)
+    初始化 (init(string& S, int& ptr);)
+}
+
+
+====================================================================2021-9-28
+BigInteger {
+    void reverse();    // 自取加法逆元
+}
+
+RationalNumber {
+    负号
+    加减
+    乘除
+    输出重载
+    void reverse_add();  // 自取加法逆元
+    void reverse_multiply();    // 自取乘法逆元
+}
+
+====================================================================2021-9-26
+test_number.cpp {
+    BigInteger {
+        负号 (-)
+        除模 (/=, %=, /, %)
+        比较 (== != < > <= >=)
+    }
+}
+
+BigInteger.h
+BigInteger.cpp
+
+tmp.cpp
+
+
+====================================================================2021-9-23
+test_number.cpp {
+    BigInteger {
+        int转换构造
+        加减法 (+=, -=, +, -, ++, --)
+        乘法 (*=, *)
+        输出重载 (cout <<)
+    }
+}
+
+
+
+
+
+
+====================================================================2021-9-22
+说明：
+    由小写字母或符号开头：    终结符
+    由大写字母开头：         文法符号
+
+@: 空
+
+E: expression, 表达式
+D: definition, 定义式
+
+
+Start
+    ::= E0 ';'
+    ::= D ';'
+
+E0
+    ::= E1
+    ::= E1 ',' E0
+
+E1
+    ::= E2 E1'
+
+E1'
+    ::= '+' E2 E1'
+    ::= '-' E2 E1'
+    ::= @
+
+E2
+    ::= E3 E2'
+
+E2'
+    ::= '*' E3 E2'
+    ::= '/' E3 E2'
+    ::= '%' E3 E2'
+    ::= @
+
+E3
+    ::= E4 E3'
+
+E3'
+    ::= '^' E4 E3'
+    ::= @
+
+E4
+    ::= '(' E5 ')'
+    ::= E5
+
+E5
+    ::= id
+    ::= number
+
+D
+    ::= id '=' E0
+    ::= id ':=' E0
+
+
+
+//====================================================================
+// C++ 语法笔记
+//====================================================================
+
+2021-10-06
+函数如果你在.h里实现，就需要inline
+inline :每个翻译单元都会实例化它，链接的时候随机保留一个 (C++17的规范)
+模板是另外一回事
+模板只能头文件内实现，每个翻译单元实例化成独立的实体
+
+2021-10-05
+函数 = default;     // 默认实现(针对构造、析构函数)
+virtual 函数 = 0;   // 纯虚函数
+
+2021-10-04
+unique_ptr 不能直接复制，需要 a = std::move(b) ，来传递。
+因此， vector<unique_ptr<...>> 的初始化不能用 {} 初始化(如 "vector<unique_ptr<>> a({...})")
+  你这样写的话是构成了一个初始化列表 (initialize_list)，然后复制进vector，调用了复制
+
+
+//====================================================================
+//====================================================================
